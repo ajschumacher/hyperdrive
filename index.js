@@ -309,7 +309,7 @@ Storage.prototype._load = function (offset, length, data, cb) {
         end: stat.data.bytes[1],
         storage: self.archive.storage(stat.name, self.options)
       }
-console.log(stat)
+
       self._stats.push(st)
       if (st.storage.open) st.storage.open(done)
       else done(null)
