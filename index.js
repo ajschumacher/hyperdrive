@@ -33,8 +33,6 @@ function Archive (drive, key, opts) {
   this.drive = drive
   this.live = this.options.live !== false
   this.metadata = drive.core.createFeed(key, this.options)
-  // TODO: find better solution than this flag (new method in HC in addition to append)
-  if (this.storage && !key) this.options.writable = false
   this.contents = null
   this.key = key || this.metadata.key
   this.owner = !key
@@ -159,6 +157,7 @@ Archive.prototype.add = function (name, cb) {
     if (err) return cb(err)
     startBlock = self.contents.blocks
     startBytes = self._bytes
+    self.options.storage.readonly = true
     if (store.open) store.open(loop)
     else loop(null)
   }
@@ -177,6 +176,7 @@ Archive.prototype.add = function (name, cb) {
   }
 
   function finalize () {
+    self.options.storage.readonly = false
     self._bytes += offset
     var entry = {
       type: 'file',
@@ -214,7 +214,6 @@ Archive.prototype._open = function (cb) {
           if (err) return cb(err)
           content = messages.Content.decode(content)
           self.options.key = content.contentFeed
-          self.options.writable = true
           if (self.storage) self.options.storage = new Storage(self)
           self.contents = self.drive.core.createFeed(self.options)
           self.contents.open(function (err) {
@@ -238,23 +237,38 @@ Archive.prototype._open = function (cb) {
       live: self.options.live
     }
 
+    if (self.storage) self.options.storage = new Storage(self)
     self.contents = self.drive.core.createFeed(null, self.options)
 
     var batch = [Buffer(JSON.stringify(header))]
     if (header.live) batch.push(messages.Content.encode({contentFeed: self.contents.key}))
 
     self._offset = batch.length
-    self.metadata.append(batch, cb)
+    self.metadata.append(batch, function (err) {
+      if (err) return cb(err)
+      self.contents.open(cb)
+    })
   })
 }
 
-Archive.prototype.finalize = function () {
-
+Archive.prototype.finalize = function (cb) {
+  if (!cb) cb = noop
+  var self = this
+  this.contents.finalize(function (err) {
+    if (err) return cb(err)
+    if (!self.live) self.metadata.append(messages.Content.encode({contentFeed: self.contents.key}))
+    self.metadata.finalize(function (err) {
+      if (err) return cb(err)
+      self.key = self.metadata.key
+      cb()
+    })
+  })
 }
 
 function Storage (archive) {
   this.archive = archive
   this.closed = false
+  this.readonly = false
   this._stats = []
 }
 
@@ -266,6 +280,7 @@ Storage.prototype.read = function (offset, length, cb) {
 }
 
 Storage.prototype.write = function (offset, data, cb) {
+  if (this.readonly) return cb(null)
   if (this.closed) return cb(new Error('Storage is closed'))
   var st = this._find(offset)
   if (!st) return this._load(offset, data.length, data, cb)
@@ -311,7 +326,7 @@ Storage.prototype._load = function (offset, length, data, cb) {
       }
 
       self._stats.push(st)
-      if (st.storage.open) st.storage.open(done)
+      if (st.storage.open) st.storage.open(done) // TODO: lru cache to close stores after 128 opens etc
       else done(null)
     }
 
@@ -343,10 +358,11 @@ var archive1 = d1.createArchive(archive.key, {
 })
 
 // archive1.list().on('data', console.log).on('end', console.log.bind(console, 'end'))
-if (require.main !== module) return
+
+// if (require.main !== module) return
 
 archive.add('index.js', function () {
-  archive.add('sintel.mp4')
+  // archive.add('sintel.mp4')
 })
 
 var stream = archive.replicate()
